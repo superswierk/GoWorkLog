@@ -34,6 +34,7 @@ type DayLog struct {
 	Start   string  `json:"Start"`
 	Koniec  string  `json:"Koniec"`
 	Godziny float64 `json:"Godziny"`
+	Netto   float64 `json:"Netto"`
 }
 
 type model struct {
@@ -76,12 +77,24 @@ $dzisiajDate = (Get-Date).Date
 $teraz = Get-Date
 $poczatekMiesiaca = Get-Date -Year $Year -Month $Month -Day 1 -Hour 0 -Minute 0 -Second 0
 $koniecMiesiaca = $poczatekMiesiaca.AddMonths(1).AddSeconds(-1)
+
+# Główne eventy systemowe (Power/Session)
 $eventIds = @(6005, 6006, 7001, 7002, 1, 42)
+# Eventy blokady (Security Log)
+$lockIds = @(4800, 4801)
 
 try {
     $events = Get-WinEvent -FilterHashtable @{
         LogName   = 'System'
         ID        = $eventIds
+        StartTime = $poczatekMiesiaca
+        EndTime   = $koniecMiesiaca
+    } -ErrorAction SilentlyContinue
+
+    # Próba pobrania eventów blokady (wymaga uprawnień i włączonego audytu)
+    $lockEvents = Get-WinEvent -FilterHashtable @{
+        LogName   = 'Security'
+        ID        = $lockIds
         StartTime = $poczatekMiesiaca
         EndTime   = $koniecMiesiaca
     } -ErrorAction SilentlyContinue
@@ -104,13 +117,36 @@ try {
             $status = ""
         }
         
-        $czas = $ostatnieWyswietlane - $pierwsze
+        # Obliczanie czasu BRUTTO
+        $czasBrutto = $ostatnieWyswietlane - $pierwsze
+        
+        # Obliczanie czasu NETTO (odejmowanie blokad ekranu)
+        $blokiWdniu = $lockEvents | Where-Object { $_.TimeCreated.Date -eq $dataZdarzenia } | Sort-Object TimeCreated
+        $czasBlokad = New-TimeSpan
+        $lockStart = $null
+
+        foreach ($ev in $blokiWdniu) {
+            if ($ev.Id -eq 4800) { # Zablokowano
+                $lockStart = $ev.TimeCreated
+            } elseif ($ev.Id -eq 4801 -and $lockStart -ne $null) { # Odblokowano
+                $czasBlokad += ($ev.TimeCreated - $lockStart)
+                $lockStart = $null
+            }
+        }
+        # Jeśli ostatnia blokada wciąż trwa (np. dzisiaj)
+        if ($lockStart -ne $null -and $dataZdarzenia -eq $dzisiajDate) {
+            $czasBlokad += ($teraz - $lockStart)
+        }
+
+        $godzinyNetto = $czasBrutto.TotalHours - $czasBlokad.TotalHours
+        if ($godzinyNetto -lt 0) { $godzinyNetto = $czasBrutto.TotalHours }
 
         [PSCustomObject]@{
             Data    = $pierwsze.ToString("yyyy-MM-dd")
             Start   = $pierwsze.ToString("HH:mm:ss")
             Koniec  = $ostatnieWyswietlane.ToString("HH:mm:ss") + $status
-            Godziny = [math]::Round($czas.TotalHours, 2)
+            Godziny = [math]::Round($czasBrutto.TotalHours, 2)
+            Netto   = [math]::Round($godzinyNetto, 2)
         }
     }
     $raport | ConvertTo-Json
@@ -119,7 +155,6 @@ try {
 }
 `, month, year)
 
-		// Zamiast -File używamy -Command i przekazujemy wygenerowany ciąg znaków psScript
 		cmd := exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-Command", psScript)
 
 		output, err := cmd.Output()
@@ -187,10 +222,11 @@ func (m model) View() string {
 		}
 
 		res := titleStyle.Render(fmt.Sprintf("RAPORT: %s", m.list.SelectedItem().(item).title)) + "\n\n"
-		res += "DATA       | DZIEŃ | START    | KONIEC   | CZAS\n"
-		res += "-----------|-------|----------|----------|---------\n"
+		res += "DATA       | DZIEŃ | START    | KONIEC          | BRUTTO  | NETTO   \n"
+		res += "-----------|-------|----------|-----------------|---------|---------\n"
 
 		var total float64
+		var totalNetto float64
 		for _, l := range m.logs {
 			t, _ := time.Parse("2006-01-02", l.Data)
 			dayName := t.Format("Mon")
@@ -203,25 +239,26 @@ func (m model) View() string {
 				isOngoing = true
 			}
 
-			line := fmt.Sprintf("%-10s | %-5s | %-8s | %-15s | ", l.Data, dayName, l.Start, displayKoniec)
-			hoursStr := fmt.Sprintf("%.2f h", l.Godziny)
+			line := fmt.Sprintf("%-10s | %-5s | %-8s | %-15s | %-7.2f | ", l.Data, dayName, l.Start, displayKoniec, l.Godziny)
+			nettoStr := fmt.Sprintf("%.2f h", l.Netto)
 
 			// Logika kolorowania
 			if isOngoing {
 				// Niebieski kolor dla aktywnej sesji
-				res += lipgloss.NewStyle().Foreground(lipgloss.Color("#5FAFFF")).Render(line + hoursStr + " 💻")
+				res += lipgloss.NewStyle().Foreground(lipgloss.Color("#5FAFFF")).Render(line + nettoStr + " 💻")
 			} else if isWeekend {
-				res += weekendStyle.Render(line + hoursStr)
-			} else if l.Godziny > 8.0 {
-				res += line + overtimeStyle.Render(hoursStr) + " 🔥"
+				res += weekendStyle.Render(line + nettoStr)
+			} else if l.Netto > 8.0 {
+				res += line + overtimeStyle.Render(nettoStr) + " 🔥"
 			} else {
-				res += line + hoursStr
+				res += line + nettoStr
 			}
 			res += "\n"
 			total += l.Godziny
+			totalNetto += l.Netto
 		}
 
-		res += summaryStyle.Render(fmt.Sprintf("\nSUMA MIESIĘCZNA: %.2f h", total))
+		res += summaryStyle.Render(fmt.Sprintf("\nSUMA MIESIĘCZNA BRUTTO: %.2f h | NETTO: %.2f h", total, totalNetto))
 		res += "\n\n [ESC] Wróć do listy"
 		return docStyle.Render(res)
 	}
