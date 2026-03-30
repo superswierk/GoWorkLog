@@ -6,9 +6,9 @@ TUI application to track Windows work hours using System Event Logs.
 
 * **Dual Time Tracking**: Brutto (total) vs Netto (active screen time).
 
-* **Real-time**: Detects ongoing sessions (💻).
+* **Multi-Month Export**: Select months and export to CSV.
 
-* **Visuals**: Overtime (🔥) and weekend highlighting.
+* **Real-time**: Detects ongoing sessions.
 
 ## Enable Auditing (Required for Netto Time)
 To track Win+L locks (Event 4800), you must enable the audit policy:
@@ -24,14 +24,18 @@ Enable **Audit Other Logon/Logoff Events** for **Success**.
 ```
 go mod init GoWorkLog
 go mod tidy
-go build -o GoWorkLog.exe
+go build -o GoWorkLog.exe main.go
 ```
 
 ## Usage
 
 * **Arrows**: Navigate months.
 
-* **Enter**: Fetch logs.
+* **Space**: Select/deselect months for export.
+
+* **x**: Export selected months to work_log_export.csv.
+
+* **Enter**: View detailed logs for the selected month.
 
 * **q / Esc**: Back to list or Exit.
 
