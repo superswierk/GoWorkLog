@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -50,7 +49,7 @@ func getAvailableMonths() []list.Item {
 	items := []list.Item{}
 	now := time.Now()
 
-	// Zaczynamy od 1. dnia obecnego miesiąca, aby AddDate działało przewidywalnie
+	// Zaczynamy od 1. dnia obecnego miasta, aby AddDate działało przewidywalnie
 	current := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
 
 	for i := 0; i < 12; i++ {
@@ -69,8 +68,59 @@ func getAvailableMonths() []list.Item {
 
 func fetchLogs(month, year int) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-File", "./get_logs.ps1",
-			"-Month", strconv.Itoa(month), "-Year", strconv.Itoa(year))
+		// Cały skrypt PowerShell osadzony bezpośrednio w kodzie Go
+		psScript := fmt.Sprintf(`
+$Month = %d
+$Year = %d
+$dzisiajDate = (Get-Date).Date
+$teraz = Get-Date
+$poczatekMiesiaca = Get-Date -Year $Year -Month $Month -Day 1 -Hour 0 -Minute 0 -Second 0
+$koniecMiesiaca = $poczatekMiesiaca.AddMonths(1).AddSeconds(-1)
+$eventIds = @(6005, 6006, 7001, 7002, 1, 42)
+
+try {
+    $events = Get-WinEvent -FilterHashtable @{
+        LogName   = 'System'
+        ID        = $eventIds
+        StartTime = $poczatekMiesiaca
+        EndTime   = $koniecMiesiaca
+    } -ErrorAction SilentlyContinue
+
+    if (-not $events) { return "[]" }
+
+    $raport = $events | Group-Object { $_.TimeCreated.Date } | Sort-Object { [datetime]$_.Name } | ForEach-Object {
+        $dataZdarzenia = [datetime]$_.Name
+        $zdarzeniaWdniu = $_.Group | Sort-Object TimeCreated
+        
+        $pierwsze = $zdarzeniaWdniu[0].TimeCreated
+        $ostatnie = $zdarzeniaWdniu[-1].TimeCreated
+        
+        # LOGIKA DLA DNIA DZISIEJSZEGO:
+        if ($dataZdarzenia -eq $dzisiajDate -and $ostatnie.Id -notin @(6006, 42)) {
+            $ostatnieWyswietlane = $teraz
+            $status = " (w toku)"
+        } else {
+            $ostatnieWyswietlane = $ostatnie
+            $status = ""
+        }
+        
+        $czas = $ostatnieWyswietlane - $pierwsze
+
+        [PSCustomObject]@{
+            Data    = $pierwsze.ToString("yyyy-MM-dd")
+            Start   = $pierwsze.ToString("HH:mm:ss")
+            Koniec  = $ostatnieWyswietlane.ToString("HH:mm:ss") + $status
+            Godziny = [math]::Round($czas.TotalHours, 2)
+        }
+    }
+    $raport | ConvertTo-Json
+} catch {
+    "[]"
+}
+`, month, year)
+
+		// Zamiast -File używamy -Command i przekazujemy wygenerowany ciąg znaków psScript
+		cmd := exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-Command", psScript)
 
 		output, err := cmd.Output()
 		if err != nil {
@@ -100,12 +150,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if m.viewingLogs {
-			if msg.String() == "esc" || msg.String() == "backspace" {
+			if msg.String() == "esc" || msg.String() == "backspace" || msg.String() == "q" {
 				m.viewingLogs = false
 				return m, nil
 			}
 		}
-		if msg.String() == "ctrl+c" || msg.String() == "q" {
+		if msg.String() == "ctrl+c" || (msg.String() == "q" && !m.viewingLogs) {
 			return m, tea.Quit
 		}
 		if msg.String() == "enter" && !m.viewingLogs {
