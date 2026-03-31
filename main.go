@@ -15,11 +15,16 @@ import (
 )
 
 var (
+	// Styl tła i marginesów
+	mainStyle = lipgloss.NewStyle().Background(lipgloss.Color("#3f3d3d")).Padding(1, 2).MaxHeight(30)
+
 	docStyle      = lipgloss.NewStyle().Margin(1, 2)
-	titleStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#00D7FF")).Bold(true)
+	titleStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#00D7FF")).Bold(true).Background(lipgloss.Color("#971919"))
 	overtimeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700")) // Złoty dla > 8h
 	weekendStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")) // Szary dla weekendów
 	summaryStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00")).Bold(true).Padding(1)
+	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000")).Bold(true).Padding(0, 1).Background(lipgloss.Color("#3f3d3d"))
+	headerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#5F5FFF")).Bold(true).MarginBottom(1)
 )
 
 type item struct {
@@ -52,6 +57,16 @@ type model struct {
 	err         error
 	viewingLogs bool
 	exportMsg   string
+	isAdmin     bool
+	width       int
+	height      int
+}
+
+// Funkcja sprawdzająca uprawnienia administratora w Windows
+func checkAdmin() bool {
+	cmd := exec.Command("net", "session")
+	err := cmd.Run()
+	return err == nil
 }
 
 // BEZPIECZNE GENEROWANIE LISTY (bez duplikatów)
@@ -95,12 +110,12 @@ try {
         EndTime   = $koniecMiesiaca
     } -ErrorAction SilentlyContinue
 
-    $lockEvents = Get-WinEvent -FilterHashtable @{
+    $lockEvents = @(Get-WinEvent -FilterHashtable @{
         LogName   = 'Security'
         ID        = $lockIds
         StartTime = $poczatekMiesiaca
         EndTime   = $koniecMiesiaca
-    } -ErrorAction SilentlyContinue
+    } -ErrorAction SilentlyContinue)
 
     if (-not $events) { return "[]" }
 
@@ -119,7 +134,7 @@ try {
         }
         
         $czasBrutto = $ostatnieWyswietlane - $pierwsze
-        $blokiWdniu = $lockEvents | Where-Object { $_.TimeCreated.Date -eq $dataZdarzenia } | Sort-Object TimeCreated
+        $blokiWdniu = @($lockEvents | Where-Object { $_ -ne $null -and $_.TimeCreated.Date -eq $dataZdarzenia } | Sort-Object TimeCreated)
         $czasBlokad = New-TimeSpan
         $lockStart = $null
 
@@ -171,8 +186,6 @@ func fetchMultipleLogs(items []list.Item) tea.Cmd {
 			}
 		}
 
-		// Jeśli nic nie zaznaczono spacją, ten Cmd nie powinien być wywołany
-		// (obsłużone w Update), ale na wszelki wypadek:
 		if !anySelected {
 			return []DayLog{}
 		}
@@ -222,7 +235,6 @@ func exportSelected(items []list.Item) tea.Cmd {
 		f.WriteString("Data;Dzien;Start;Koniec;Brutto;Netto\n")
 		for _, l := range allLogs {
 			t, _ := time.Parse("2006-01-02", l.Data)
-			// Czyścimy status (w toku) do CSV
 			cleanKoniec := strings.ReplaceAll(l.Koniec, " (w toku)", "")
 			line := fmt.Sprintf("%s;%s;%s;%s;%.2f;%.2f\n", l.Data, t.Format("Mon"), l.Start, cleanKoniec, l.Godziny, l.Netto)
 			f.WriteString(strings.ReplaceAll(line, ".", ",")) // Zamiana kropki na przecinek dla Excela/Calc
@@ -233,12 +245,21 @@ func exportSelected(items []list.Item) tea.Cmd {
 }
 
 func initialModel() model {
-	l := list.New(getAvailableMonths(), list.NewDefaultDelegate(), 40, 15)
-	l.Title = "HISTORIA CZASU PRACY"
+	d := list.NewDefaultDelegate()
+	c := lipgloss.Color("#cddd72")
+	d.Styles.NormalTitle.Background(c)
+	d.Styles.NormalDesc.Background(c)
+	d.Styles.SelectedTitle.Foreground(c)
+	d.Styles.SelectedDesc.Background(c)
+	l := list.New(getAvailableMonths(), d, 40, 15)
+	l.Title = "WYBIERZ MIESIĄC"
 	l.SetShowStatusBar(false)
 	l.Styles.Title = titleStyle
 
-	return model{list: l}
+	return model{
+		list:    l,
+		isAdmin: checkAdmin(),
+	}
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -273,7 +294,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, exportSelected(m.list.Items())
 		}
 		if msg.String() == "enter" && !m.viewingLogs {
-			// Sprawdzamy czy są zaznaczone miesiące
 			hasSelection := false
 			for _, i := range m.list.Items() {
 				if i.(item).selected {
@@ -297,6 +317,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		h, v := docStyle.GetFrameSize()
 		m.list.SetSize(msg.Width-h, msg.Height-v)
+		m.width, m.height = msg.Width, msg.Height
 	case []DayLog:
 		m.logs = msg
 		m.loading = false
@@ -307,55 +328,68 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	if m.viewingLogs {
-		if m.loading {
-			return docStyle.Render("\n 🔍 Przeszukiwanie dziennika zdarzeń Windows...")
-		}
-		if len(m.logs) == 0 {
-			return docStyle.Render("\n Brak zapisanych zdarzeń.\n\n [ESC] Powrót")
-		}
-
-		res := titleStyle.Render("RAPORT SZCZEGÓŁOWY") + "\n\n"
-		res += "DATA       | DZIEŃ | START    | KONIEC          | BRUTTO  | NETTO   \n"
-		res += "-----------|-------|----------|-----------------|---------|---------\n"
-
-		var total float64
-		var totalNetto float64
-		for _, l := range m.logs {
-			t, _ := time.Parse("2006-01-02", l.Data)
-			dayName := t.Format("Mon")
-			isWeekend := t.Weekday() == time.Saturday || t.Weekday() == time.Sunday
-
-			// Logika trwającej sesji
-			isOngoing := strings.Contains(l.Koniec, "(w toku)")
-			displayKoniec := l.Koniec
-
-			line := fmt.Sprintf("%-10s | %-5s | %-8s | %-15s | %-7.2f | ", l.Data, dayName, l.Start, displayKoniec, l.Godziny)
-			nettoStr := fmt.Sprintf("%.2f h", l.Netto)
-
-			// Logika kolorowania
-			if isOngoing {
-				// Jasnoniebieski dla aktywnej sesji
-				res += lipgloss.NewStyle().Foreground(lipgloss.Color("#5FAFFF")).Render(line + nettoStr + " 💻")
-			} else if isWeekend {
-				res += weekendStyle.Render(line + nettoStr)
-			} else if l.Netto > 8.0 {
-				res += line + overtimeStyle.Render(nettoStr) + " 🔥"
-			} else {
-				res += line + nettoStr
-			}
-			res += "\n"
-			total += l.Godziny
-			totalNetto += l.Netto
-		}
-
-		res += summaryStyle.Render(fmt.Sprintf("\nSUMA OKRESU BRUTTO: %.2f h | NETTO: %.2f h", total, totalNetto))
-		res += "\n\n [ESC] Wróć do listy"
-		return docStyle.Render(res)
+	// Nagłówek ASCII
+	header := headerStyle.Render(`GoWorkLog`)
+	var adminWarning string
+	if !m.isAdmin {
+		adminWarning = errorStyle.Render("!!! BRAK UPRAWNIEŃ ADMINISTRATORA - CZAS NETTO BĘDZIE NIEDOKŁADNY !!!\n")
 	}
 
-	help := "\n [SPACE] Zaznacz | [ENTER] Podgląd (również wielu) | [x] Eksportuj"
-	return docStyle.Render(m.list.View() + help + "\n\n " + m.exportMsg)
+	var content string
+	if m.viewingLogs {
+		if m.loading {
+			content = docStyle.Render("\n 🔍 Przeszukiwanie dziennika zdarzeń Windows...")
+		} else if len(m.logs) == 0 {
+			content = docStyle.Render("\n Brak zapisanych zdarzeń.\n\n [ESC] Powrót")
+		} else {
+			res := titleStyle.Render("RAPORT SZCZEGÓŁOWY") + "\n\n"
+			res += "DATA       | DZIEŃ | START    | KONIEC          | BRUTTO  | NETTO   \n"
+			res += "-----------|-------|----------|-----------------|---------|---------\n"
+
+			var total float64
+			var totalNetto float64
+			for _, l := range m.logs {
+				t, _ := time.Parse("2006-01-02", l.Data)
+				dayName := t.Format("Mon")
+				isWeekend := t.Weekday() == time.Saturday || t.Weekday() == time.Sunday
+
+				// Logika trwającej sesji
+				isOngoing := strings.Contains(l.Koniec, "(w toku)")
+				displayKoniec := l.Koniec
+
+				line := fmt.Sprintf("%-10s | %-5s | %-8s | %-15s | %-7.2f | ", l.Data, dayName, l.Start, displayKoniec, l.Godziny)
+				nettoStr := fmt.Sprintf("%.2f h", l.Netto)
+
+				// Logika kolorowania
+				if isOngoing {
+					// Jasnoniebieski dla aktywnej sesji
+					res += lipgloss.NewStyle().Foreground(lipgloss.Color("#5FAFFF")).Render(line + nettoStr + " 💻")
+				} else if isWeekend {
+					res += weekendStyle.Render(line + nettoStr)
+				} else if l.Netto > 8.0 {
+					res += line + overtimeStyle.Render(nettoStr) + " 🔥"
+				} else {
+					res += line + nettoStr
+				}
+				res += "\n"
+				total += l.Godziny
+				totalNetto += l.Netto
+			}
+
+			res += summaryStyle.Render(fmt.Sprintf("\nSUMA OKRESU BRUTTO: %.2f h | NETTO: %.2f h", total, totalNetto))
+			res += "\n\n [ESC] Wróć do listy"
+			content = docStyle.Render(res)
+		}
+	} else {
+		help := "\n [SPACE] Zaznacz | [ENTER] Podgląd | [x] Eksportuj"
+		content = docStyle.Background(lipgloss.Color("#297256")).Render(m.list.View() + help + "\n\n " + m.exportMsg)
+	}
+
+	// Renderowanie całości w kontenerze z tłem
+	return mainStyle.
+		Width(m.width).
+		Height(m.height).
+		Render(header + "\n" + adminWarning + "\n" + content)
 }
 
 func main() {
