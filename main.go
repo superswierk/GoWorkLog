@@ -103,12 +103,12 @@ $eventIds = @(6005, 6006, 7001, 7002, 1, 42)
 $lockIds = @(4800, 4801)
 
 try {
-    $events = Get-WinEvent -FilterHashtable @{
+    $events = @(Get-WinEvent -FilterHashtable @{
         LogName   = 'System'
         ID        = $eventIds
         StartTime = $poczatekMiesiaca
         EndTime   = $koniecMiesiaca
-    } -ErrorAction SilentlyContinue
+    } -ErrorAction SilentlyContinue)
 
     $lockEvents = @(Get-WinEvent -FilterHashtable @{
         LogName   = 'Security'
@@ -117,24 +117,52 @@ try {
         EndTime   = $koniecMiesiaca
     } -ErrorAction SilentlyContinue)
 
-    if (-not $events) { return "[]" }
+    # Poprawka nr 1: Nie przerywamy, jeśli rano nie wpadł log 'System', ale są logi 'Security'
+    $allEvents = @($events + $lockEvents) | Where-Object { $_ -ne $null }
+    if ($allEvents.Count -eq 0) { return "[]" }
 
-    $raport = $events | Group-Object { $_.TimeCreated.Date } | Sort-Object { [datetime]$_.Name } | ForEach-Object {
-        $dataZdarzenia = [datetime]$_.Name
-        $zdarzeniaWdniu = $_.Group | Sort-Object TimeCreated
-        $pierwsze = $zdarzeniaWdniu[0].TimeCreated
-        $ostatnie = $zdarzeniaWdniu[-1].TimeCreated
+    # Zbieramy wszystkie unikalne daty, z których mamy jakiekolwiek zdarzenia
+    $unikalneDaty = $allEvents | ForEach-Object { $_.TimeCreated.Date } | Select-Object -Unique | Sort-Object
+
+    $raport = $unikalneDaty | ForEach-Object {
+        $dataZdarzenia = $_
         
-        if ($dataZdarzenia -eq $dzisiajDate -and $ostatnie.Id -notin @(6006, 42)) {
+        # Filtrujemy zdarzenia dla analizowanego dnia
+        $zdarzeniaWdniu = @($events | Where-Object { $_ -ne $null -and $_.TimeCreated.Date -eq $dataZdarzenia } | Sort-Object TimeCreated)
+        $blokiWdniu = @($lockEvents | Where-Object { $_ -ne $null -and $_.TimeCreated.Date -eq $dataZdarzenia } | Sort-Object TimeCreated)
+        
+        # Poprawka nr 2: Operujemy na całych obiektach zdarzeń, by mieć dostęp do .Id i .TimeCreated
+        $pierwszeZdarzenie = $null
+        $ostatnieZdarzenie = $null
+
+        if ($zdarzeniaWdniu) { $pierwszeZdarzenie = $zdarzeniaWdniu[0] }
+        elseif ($blokiWdniu) { $pierwszeZdarzenie = $blokiWdniu[0] }
+
+        if ($zdarzeniaWdniu) { $ostatnieZdarzenie = $zdarzeniaWdniu[-1] }
+        elseif ($blokiWdniu) { $ostatnieZdarzenie = $blokiWdniu[-1] }
+
+        if ($pierwszeZdarzenie -eq $null) { return }
+
+        $pierwsze = $pierwszeZdarzenie.TimeCreated
+        $ostatnie = $ostatnieZdarzenie.TimeCreated
+
+        # Sprawdzamy czy ostatni log sugeruje zamknięcie pracy (na oryginalnym obiekcie zdarzenia)
+        $isClosing = $false
+        if ($zdarzeniaWdniu) {
+            $lastId = $zdarzeniaWdniu[-1].Id
+            if ($lastId -eq 6006 -or $lastId -eq 42) { $isClosing = $true }
+        }
+
+        $status = ""
+        $ostatnieWyswietlane = $ostatnie
+        
+        # Jeśli to dzisiaj i sesja nie ma logu zamknięcia, traktujemy ją jako "w toku"
+        if ($dataZdarzenia -eq $dzisiajDate -and -not $isClosing) {
             $ostatnieWyswietlane = $teraz
             $status = " (w toku)"
-        } else {
-            $ostatnieWyswietlane = $ostatnie
-            $status = ""
         }
         
         $czasBrutto = $ostatnieWyswietlane - $pierwsze
-        $blokiWdniu = @($lockEvents | Where-Object { $_ -ne $null -and $_.TimeCreated.Date -eq $dataZdarzenia } | Sort-Object TimeCreated)
         $czasBlokad = New-TimeSpan
         $lockStart = $null
 
@@ -148,7 +176,7 @@ try {
         if ($lockStart -ne $null -and $dataZdarzenia -eq $dzisiajDate) { $czasBlokad += ($teraz - $lockStart) }
 
         $godzinyNetto = $czasBrutto.TotalHours - $czasBlokad.TotalHours
-        if ($godzinyNetto -lt 0) { $godzinyNetto = $czasBrutto.TotalHours }
+        if ($godzinyNetto -lt 0 -or $blokiWdniu.Count -eq 0) { $godzinyNetto = $czasBrutto.TotalHours }
 
         [PSCustomObject]@{
             Data    = $pierwsze.ToString("yyyy-MM-dd")
@@ -163,13 +191,21 @@ try {
 `, month, year)
 
 	cmd := exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-Command", psScript)
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, err
 	}
+	// DEBUG: Jeśli chcesz zobaczyć surowy wynik w konsoli podczas pracy, odkomentuj poniższą linię:
+	//fmt.Printf("RAW PS OUTPUT: %s\n", string(output))
 
 	var logs []DayLog
-	err = json.Unmarshal(output, &logs)
+	if err := json.Unmarshal(output, &logs); err != nil {
+		var singleLog DayLog
+		if errSingle := json.Unmarshal(output, &singleLog); errSingle == nil {
+			return []DayLog{singleLog}, nil
+		}
+		return nil, fmt.Errorf("JSON error: %v, Content: %s", err, string(output))
+	}
 	return logs, err
 }
 
