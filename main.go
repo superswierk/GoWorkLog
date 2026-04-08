@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 var (
@@ -305,7 +305,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case string:
 		m.exportMsg = msg
 		return m, nil
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.viewingLogs {
 			if msg.String() == "esc" || msg.String() == "backspace" || msg.String() == "q" {
 				m.viewingLogs = false
@@ -318,7 +318,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "q" && !m.viewingLogs {
 			return m, tea.Quit
 		}
-		if msg.String() == " " && !m.viewingLogs {
+		if msg.String() == "space" && !m.viewingLogs {
 			idx := m.list.Index()
 			it := m.list.Items()[idx].(item)
 			it.selected = !it.selected
@@ -363,7 +363,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m model) View() string {
+func (m model) View() tea.View {
+	var v tea.View
 	// Nagłówek ASCII
 	header := headerStyle.Render(`GoWorkLog`)
 	var adminWarning string
@@ -422,14 +423,16 @@ func (m model) View() string {
 	}
 
 	// Renderowanie całości w kontenerze z tłem
-	return mainStyle.
+	v.SetContent(mainStyle.
 		Width(m.width).
 		Height(m.height).
-		Render(header + "\n" + adminWarning + "\n" + content)
+		Render(header + "\n" + adminWarning + "\n" + content))
+	v.AltScreen = true
+	return v
 }
 
 func main() {
-	if _, err := tea.NewProgram(initialModel(), tea.WithAltScreen()).Run(); err != nil {
+	if _, err := tea.NewProgram(initialModel()).Run(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
