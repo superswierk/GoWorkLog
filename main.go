@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,7 +17,7 @@ import (
 
 var (
 	// Styl tła i marginesów
-	mainStyle = lipgloss.NewStyle().Background(lipgloss.Color("#3f3d3d")).Padding(1, 2).MaxHeight(30)
+	mainStyle = lipgloss.NewStyle().Background(lipgloss.Color("#3f3d3d")).Padding(1, 2)
 
 	docStyle      = lipgloss.NewStyle().Margin(1, 2)
 	titleStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#00D7FF")).Bold(true).Background(lipgloss.Color("#971919"))
@@ -62,6 +63,8 @@ type model struct {
 	height      int
 }
 
+type adminCheckMsg bool
+
 // Funkcja sprawdzająca uprawnienia administratora w Windows
 func checkAdmin() bool {
 	cmd := exec.Command("net", "session")
@@ -82,8 +85,8 @@ func getAvailableMonths() []list.Item {
 		monthName := target.Format("January")
 
 		items = append(items, item{
-			title: lipgloss.Sprintf("%s %d", monthName, target.Year()),
-			desc:  lipgloss.Sprintf("Statystyki za %02d/%d", int(target.Month()), target.Year()),
+			title: fmt.Sprintf("%s %d", monthName, target.Year()),
+			desc:  fmt.Sprintf("Statystyki za %02d/%d", int(target.Month()), target.Year()),
 			month: int(target.Month()),
 			year:  target.Year(),
 		})
@@ -92,9 +95,9 @@ func getAvailableMonths() []list.Item {
 }
 
 func fetchLogsSync(month, year int) ([]DayLog, error) {
-	psScript := lipgloss.Sprintf(`
-$Month = %d
-$Year = %d
+	const psScript = `
+$Month = [int]$env:WL_MONTH
+$Year = [int]$env:WL_YEAR
 $dzisiajDate = (Get-Date).Date
 $teraz = Get-Date
 $poczatekMiesiaca = Get-Date -Year $Year -Month $Month -Day 1 -Hour 0 -Minute 0 -Second 0
@@ -188,9 +191,12 @@ try {
     }
     $raport | ConvertTo-Json
 } catch { "[]" }
-`, month, year)
+`
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	cmd := exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-Command", psScript)
+	cmd := exec.CommandContext(ctx, "powershell", "-ExecutionPolicy", "Bypass", "-Command", psScript)
+	cmd.Env = append(os.Environ(), fmt.Sprintf("WL_MONTH=%d", month), fmt.Sprintf("WL_YEAR=%d", year))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, err
@@ -212,18 +218,26 @@ try {
 func fetchMultipleLogs(items []list.Item) tea.Cmd {
 	return func() tea.Msg {
 		var allLogs []DayLog
+		var fetchErr error
 		anySelected := false
 		for _, i := range items {
 			it := i.(item)
 			if it.selected {
 				anySelected = true
-				logs, _ := fetchLogsSync(it.month, it.year)
-				allLogs = append(allLogs, logs...)
+				logs, err := fetchLogsSync(it.month, it.year)
+				if err != nil {
+					fetchErr = err
+				} else {
+					allLogs = append(allLogs, logs...)
+				}
 			}
 		}
 
 		if !anySelected {
 			return []DayLog{}
+		}
+		if len(allLogs) == 0 && fetchErr != nil {
+			return fetchErr
 		}
 
 		sort.Slice(allLogs, func(i, j int) bool {
@@ -237,7 +251,7 @@ func fetchLogs(month, year int) tea.Cmd {
 	return func() tea.Msg {
 		logs, err := fetchLogsSync(month, year)
 		if err != nil {
-			return []DayLog{}
+			return err
 		}
 		return logs
 	}
@@ -268,11 +282,11 @@ func exportSelected(items []list.Item) tea.Cmd {
 		}
 		defer f.Close()
 
-		f.WriteString("Data;Dzien;Start;Koniec;Brutto;Netto\n")
+		f.WriteString("\xEF\xBB\xBF" + "Data;Dzien;Start;Koniec;Brutto;Netto\n") // UTF-8 BOM dla Excela
 		for _, l := range allLogs {
 			t, _ := time.Parse("2006-01-02", l.Data)
 			cleanKoniec := strings.ReplaceAll(l.Koniec, " (w toku)", "")
-			line := lipgloss.Sprintf("%s;%s;%s;%s;%.2f;%.2f\n", l.Data, t.Format("Mon"), l.Start, cleanKoniec, l.Godziny, l.Netto)
+			line := fmt.Sprintf("%s;%s;%s;%s;%.2f;%.2f\n", l.Data, t.Format("Mon"), l.Start, cleanKoniec, l.Godziny, l.Netto)
 			f.WriteString(strings.ReplaceAll(line, ".", ",")) // Zamiana kropki na przecinek dla Excela/Calc
 		}
 
@@ -293,15 +307,23 @@ func initialModel() model {
 	l.Styles.Title = titleStyle
 
 	return model{
-		list:    l,
-		isAdmin: checkAdmin(),
+		list: l,
 	}
 }
 
-func (m model) Init() tea.Cmd { return nil }
+func (m model) Init() tea.Cmd {
+	return func() tea.Msg { return adminCheckMsg(checkAdmin()) }
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case adminCheckMsg:
+		m.isAdmin = bool(msg)
+		return m, nil
+	case error:
+		m.err = msg
+		m.loading = false
+		return m, nil
 	case string:
 		m.exportMsg = msg
 		return m, nil
@@ -376,6 +398,8 @@ func (m model) View() tea.View {
 	if m.viewingLogs {
 		if m.loading {
 			content = docStyle.Render("\n 🔍 Przeszukiwanie dziennika zdarzeń Windows...")
+		} else if m.err != nil {
+			content = docStyle.Render("\n Błąd pobierania danych: " + m.err.Error() + "\n\n [ESC] Powrót")
 		} else if len(m.logs) == 0 {
 			content = docStyle.Render("\n Brak zapisanych zdarzeń.\n\n [ESC] Powrót")
 		} else {
@@ -394,8 +418,8 @@ func (m model) View() tea.View {
 				isOngoing := strings.Contains(l.Koniec, "(w toku)")
 				displayKoniec := l.Koniec
 
-				line := lipgloss.Sprintf("%-10s | %-5s | %-8s | %-15s | %-7.2f | ", l.Data, dayName, l.Start, displayKoniec, l.Godziny)
-				nettoStr := lipgloss.Sprintf("%.2f h", l.Netto)
+				line := fmt.Sprintf("%-10s | %-5s | %-8s | %-15s | %-7.2f | ", l.Data, dayName, l.Start, displayKoniec, l.Godziny)
+				nettoStr := fmt.Sprintf("%.2f h", l.Netto)
 
 				// Logika kolorowania
 				if isOngoing {
@@ -413,7 +437,7 @@ func (m model) View() tea.View {
 				totalNetto += l.Netto
 			}
 
-			res += summaryStyle.Render(lipgloss.Sprintf("\nSUMA OKRESU BRUTTO: %.2f h | NETTO: %.2f h", total, totalNetto))
+			res += summaryStyle.Render(fmt.Sprintf("\nSUMA OKRESU BRUTTO: %.2f h | NETTO: %.2f h", total, totalNetto))
 			res += "\n\n [ESC] Wróć do listy"
 			content = docStyle.Render(res)
 		}
