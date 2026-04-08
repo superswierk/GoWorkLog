@@ -82,8 +82,8 @@ func getAvailableMonths() []list.Item {
 		monthName := target.Format("January")
 
 		items = append(items, item{
-			title: fmt.Sprintf("%s %d", monthName, target.Year()),
-			desc:  fmt.Sprintf("Statystyki za %02d/%d", int(target.Month()), target.Year()),
+			title: lipgloss.Sprintf("%s %d", monthName, target.Year()),
+			desc:  lipgloss.Sprintf("Statystyki za %02d/%d", int(target.Month()), target.Year()),
 			month: int(target.Month()),
 			year:  target.Year(),
 		})
@@ -92,7 +92,7 @@ func getAvailableMonths() []list.Item {
 }
 
 func fetchLogsSync(month, year int) ([]DayLog, error) {
-	psScript := fmt.Sprintf(`
+	psScript := lipgloss.Sprintf(`
 $Month = %d
 $Year = %d
 $dzisiajDate = (Get-Date).Date
@@ -272,7 +272,7 @@ func exportSelected(items []list.Item) tea.Cmd {
 		for _, l := range allLogs {
 			t, _ := time.Parse("2006-01-02", l.Data)
 			cleanKoniec := strings.ReplaceAll(l.Koniec, " (w toku)", "")
-			line := fmt.Sprintf("%s;%s;%s;%s;%.2f;%.2f\n", l.Data, t.Format("Mon"), l.Start, cleanKoniec, l.Godziny, l.Netto)
+			line := lipgloss.Sprintf("%s;%s;%s;%s;%.2f;%.2f\n", l.Data, t.Format("Mon"), l.Start, cleanKoniec, l.Godziny, l.Netto)
 			f.WriteString(strings.ReplaceAll(line, ".", ",")) // Zamiana kropki na przecinek dla Excela/Calc
 		}
 
@@ -394,8 +394,8 @@ func (m model) View() tea.View {
 				isOngoing := strings.Contains(l.Koniec, "(w toku)")
 				displayKoniec := l.Koniec
 
-				line := fmt.Sprintf("%-10s | %-5s | %-8s | %-15s | %-7.2f | ", l.Data, dayName, l.Start, displayKoniec, l.Godziny)
-				nettoStr := fmt.Sprintf("%.2f h", l.Netto)
+				line := lipgloss.Sprintf("%-10s | %-5s | %-8s | %-15s | %-7.2f | ", l.Data, dayName, l.Start, displayKoniec, l.Godziny)
+				nettoStr := lipgloss.Sprintf("%.2f h", l.Netto)
 
 				// Logika kolorowania
 				if isOngoing {
@@ -413,7 +413,7 @@ func (m model) View() tea.View {
 				totalNetto += l.Netto
 			}
 
-			res += summaryStyle.Render(fmt.Sprintf("\nSUMA OKRESU BRUTTO: %.2f h | NETTO: %.2f h", total, totalNetto))
+			res += summaryStyle.Render(lipgloss.Sprintf("\nSUMA OKRESU BRUTTO: %.2f h | NETTO: %.2f h", total, totalNetto))
 			res += "\n\n [ESC] Wróć do listy"
 			content = docStyle.Render(res)
 		}
@@ -433,7 +433,7 @@ func (m model) View() tea.View {
 
 func main() {
 	if _, err := tea.NewProgram(initialModel()).Run(); err != nil {
-		fmt.Println(err)
+		lipgloss.Println(err)
 		os.Exit(1)
 	}
 }
