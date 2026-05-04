@@ -13,11 +13,14 @@ import (
 	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/table"
 )
 
 var (
 	// Styl tła i marginesów
 	mainStyle = lipgloss.NewStyle().Background(lipgloss.Color("#3f3d3d")).Padding(1, 2)
+
+	mainTableStyle = lipgloss.NewStyle().Inherit(mainStyle).Padding(0, 0)
 
 	docStyle      = lipgloss.NewStyle().Margin(1, 2)
 	titleStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#00D7FF")).Bold(true).Background(lipgloss.Color("#971919"))
@@ -403,26 +406,27 @@ func (m model) View() tea.View {
 		} else if len(m.logs) == 0 {
 			content = docStyle.Render("\n Brak zapisanych zdarzeń.\n\n [ESC] Powrót")
 		} else {
-			res := titleStyle.Render("RAPORT SZCZEGÓŁOWY") + "\n\n"
-			res += "DATA       | DZIEŃ | START    | KONIEC          | BRUTTO  | NETTO   \n"
-			res += "-----------|-------|----------|-----------------|---------|---------\n"
-
+			tab := table.New().Headers("DATA", "DZIEŃ", "START", "KONIEC", "BRUTTO", "NETTO")
+			//res := titleStyle.Render("RAPORT SZCZEGÓŁOWY") + "\n\n"
+			//res += "DATA       | DZIEŃ | START    | KONIEC          | BRUTTO  | NETTO   \n"
+			//res += "-----------|-------|----------|-----------------|---------|---------\n"
+			data := [][]string{}
 			var total float64
 			var totalNetto float64
 			for _, l := range m.logs {
 				t, _ := time.Parse("2006-01-02", l.Data)
 				dayName := t.Format("Mon")
-				isWeekend := t.Weekday() == time.Saturday || t.Weekday() == time.Sunday
+				//isWeekend := t.Weekday() == time.Saturday || t.Weekday() == time.Sunday
 
 				// Logika trwającej sesji
-				isOngoing := strings.Contains(l.Koniec, "(w toku)")
+				//isOngoing := strings.Contains(l.Koniec, "(w toku)")
 				displayKoniec := l.Koniec
-
-				line := fmt.Sprintf("%-10s | %-5s | %-8s | %-15s | %-7.2f | ", l.Data, dayName, l.Start, displayKoniec, l.Godziny)
-				nettoStr := fmt.Sprintf("%.2f h", l.Netto)
+				data = append(data, []string{fmt.Sprintf("%-10s", l.Data), fmt.Sprintf("%-5s", dayName), fmt.Sprintf("%-8s", l.Start), fmt.Sprintf("%-15s", displayKoniec), fmt.Sprintf("%.2f h", l.Godziny), fmt.Sprintf("%.2f h", l.Netto)})
+				//line := fmt.Sprintf("%-10s | %-5s | %-8s | %-15s | %-7.2f | ", l.Data, dayName, l.Start, displayKoniec, l.Godziny)
+				//nettoStr := fmt.Sprintf("%.2f h", l.Netto)
 
 				// Logika kolorowania
-				if isOngoing {
+				/*if isOngoing {
 					// Jasnoniebieski dla aktywnej sesji
 					res += lipgloss.NewStyle().Foreground(lipgloss.Color("#5FAFFF")).Render(line + nettoStr + " 💻")
 				} else if isWeekend {
@@ -431,15 +435,32 @@ func (m model) View() tea.View {
 					res += line + overtimeStyle.Render(nettoStr) + " 🔥"
 				} else {
 					res += line + nettoStr
-				}
-				res += "\n"
+				}*/
+				//res += "\n"
 				total += l.Godziny
 				totalNetto += l.Netto
 			}
+			tab.Rows(data...)
+			//outputDbg := ""
+			tab.StyleFunc(func(row, col int) lipgloss.Style {
+				var style lipgloss.Style
+				style = mainTableStyle
+				// Arabic is a right-to-left language, so right align the text.
+				if col >= 4 {
+					style = style.Align(lipgloss.Right)
+				}
+				//outputDbg = outputDbg + " " + string(row)
+				//fmt.Printf("[%i;%i]", row, col)
+				if col >= 0 && row >= 0 && strings.Contains(data[row][3], "(w toku)") {
+					style = style.Foreground(lipgloss.Color("#5FAFFF"))
+				}
 
-			res += summaryStyle.Render(fmt.Sprintf("\nSUMA OKRESU BRUTTO: %.2f h | NETTO: %.2f h", total, totalNetto))
-			res += "\n\n [ESC] Wróć do listy"
-			content = docStyle.Render(res)
+				return style
+			})
+			//res += summaryStyle.Render(fmt.Sprintf("\nSUMA OKRESU BRUTTO: %.2f h | NETTO: %.2f h", total, totalNetto))
+			//res += "\n\n [ESC] Wróć do listy"
+			//content = docStyle.Render(res)
+			content = tab.Render()
 		}
 	} else {
 		help := "\n [SPACE] Zaznacz | [ENTER] Podgląd | [x] Eksportuj"
