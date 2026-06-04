@@ -18,7 +18,7 @@ import (
 
 var (
 	// Styl tła i marginesów
-	mainStyle = lipgloss.NewStyle().Background(lipgloss.Color("#3f3d3d")).Padding(1, 2)
+	mainStyle = lipgloss.NewStyle().Padding(1, 2)
 
 	mainTableStyle = lipgloss.NewStyle().Inherit(mainStyle).Padding(0, 0)
 
@@ -27,7 +27,7 @@ var (
 	overtimeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700")) // Złoty dla > 8h
 	weekendStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")) // Szary dla weekendów
 	summaryStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00")).Bold(true).Padding(1)
-	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000")).Bold(true).Padding(0, 1).Background(lipgloss.Color("#3f3d3d"))
+	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000")).Bold(true).Padding(0, 0).MarginBottom(1)
 	headerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#5F5FFF")).Bold(true).MarginBottom(1)
 )
 
@@ -299,15 +299,20 @@ func exportSelected(items []list.Item) tea.Cmd {
 
 func initialModel() model {
 	d := list.NewDefaultDelegate()
-	c := lipgloss.Color("#cddd72")
-	d.Styles.NormalTitle.Background(c)
-	d.Styles.NormalDesc.Background(c)
-	d.Styles.SelectedTitle.Foreground(c)
-	d.Styles.SelectedDesc.Background(c)
-	l := list.New(getAvailableMonths(), d, 40, 15)
+	d.Styles.NormalDesc = d.Styles.NormalDesc.
+		Foreground(lipgloss.Color("#8d8d89"))
+	l := list.New(getAvailableMonths(), d, 40, 20)
 	l.Title = "WYBIERZ MIESIĄC"
 	l.SetShowStatusBar(false)
-	l.Styles.Title = titleStyle
+	l.SetShowHelp(false)
+
+	l.Paginator.ActiveDot = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#ffffff")).Render("•")
+
+	l.Paginator.InactiveDot = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8d8d89")).Render("•")
+
+	//	l.Styles.Title = titleStyle
 
 	return model{
 		list: l,
@@ -376,9 +381,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.WindowSizeMsg:
-		h, v := docStyle.GetFrameSize()
-		m.list.SetSize(msg.Width-h, msg.Height-v)
-		m.width, m.height = msg.Width, msg.Height
+		//h, v := docStyle.GetFrameSize()
+		//m.list.SetSize(msg.Width-h, msg.Height-v)
+		//m.width, m.height = msg.Width, msg.Height
 	case []DayLog:
 		m.logs = msg
 		m.loading = false
@@ -394,7 +399,7 @@ func (m model) View() tea.View {
 	header := headerStyle.Render(`GoWorkLog`)
 	var adminWarning string
 	if !m.isAdmin {
-		adminWarning = errorStyle.Render("!!! BRAK UPRAWNIEŃ ADMINISTRATORA - CZAS NETTO BĘDZIE NIEDOKŁADNY !!!\n")
+		adminWarning = errorStyle.Render("!!! BRAK UPRAWNIEŃ ADMINISTRATORA - CZAS NETTO BĘDZIE NIEDOKŁADNY !!!")
 	}
 
 	var content string
@@ -421,7 +426,7 @@ func (m model) View() tea.View {
 				// Logika trwającej sesji
 				//isOngoing := strings.Contains(l.Koniec, "(w toku)")
 				displayKoniec := l.Koniec
-				data = append(data, []string{fmt.Sprintf("%-10s", l.Data), fmt.Sprintf("%-5s", dayName), fmt.Sprintf("%-8s", l.Start), fmt.Sprintf("%-15s", displayKoniec), fmt.Sprintf("%.2f h", l.Godziny), fmt.Sprintf("%.2f h", l.Netto)})
+				data = append(data, []string{fmt.Sprintf("%-10s", l.Data), fmt.Sprintf("%-3s", dayName), fmt.Sprintf("%-8s", l.Start), strings.ReplaceAll(displayKoniec, " (w toku)", "💻"), fmt.Sprintf("%.2f h", l.Godziny), fmt.Sprintf("%.2f h", l.Netto)})
 				//line := fmt.Sprintf("%-10s | %-5s | %-8s | %-15s | %-7.2f | ", l.Data, dayName, l.Start, displayKoniec, l.Godziny)
 				//nettoStr := fmt.Sprintf("%.2f h", l.Netto)
 
@@ -436,11 +441,15 @@ func (m model) View() tea.View {
 				} else {
 					res += line + nettoStr
 				}*/
+
 				//res += "\n"
+
 				total += l.Godziny
 				totalNetto += l.Netto
 			}
+			data = append(data, []string{"", "", "", "RAZEM:", fmt.Sprintf("%.2f h", total), fmt.Sprintf("%.2f h", totalNetto)})
 			tab.Rows(data...)
+			//tab.Border(lipgloss.HiddenBorder())
 			//outputDbg := ""
 			tab.StyleFunc(func(row, col int) lipgloss.Style {
 				var style lipgloss.Style
@@ -449,30 +458,42 @@ func (m model) View() tea.View {
 				if col >= 4 {
 					style = style.Align(lipgloss.Right)
 				}
+				if col <= 3 {
+					style = style.Align(lipgloss.Center)
+				}
 				//outputDbg = outputDbg + " " + string(row)
 				//fmt.Printf("[%i;%i]", row, col)
-				if col >= 0 && row >= 0 && strings.Contains(data[row][3], "(w toku)") {
+				if col >= 0 && row >= 0 && strings.Contains(data[row][3], "💻") {
+
 					style = style.Foreground(lipgloss.Color("#5FAFFF"))
+
+				}
+
+				if row == len(data)-1 && col >= 3 {
+					style = style.Foreground(lipgloss.Color("#dcff5f")).Border(lipgloss.NormalBorder()).
+						BorderTop(true).
+						BorderLeft(false).
+						BorderRight(false).
+						BorderBottom(false)
 				}
 
 				return style
 			})
-			//res += summaryStyle.Render(fmt.Sprintf("\nSUMA OKRESU BRUTTO: %.2f h | NETTO: %.2f h", total, totalNetto))
+
 			//res += "\n\n [ESC] Wróć do listy"
 			//content = docStyle.Render(res)
 			content = tab.Render()
+
 		}
 	} else {
 		help := "\n [SPACE] Zaznacz | [ENTER] Podgląd | [x] Eksportuj"
-		content = docStyle.Background(lipgloss.Color("#297256")).Render(m.list.View() + help + "\n\n " + m.exportMsg)
+		content = m.list.View() + help + "\n" + m.exportMsg
 	}
 
 	// Renderowanie całości w kontenerze z tłem
-	v.SetContent(mainStyle.
-		Width(m.width).
-		Height(m.height).
-		Render(header + "\n" + adminWarning + "\n" + content))
+	v.SetContent(header + "\n" + adminWarning + "\n" + content)
 	v.AltScreen = true
+	v.BackgroundColor = lipgloss.Color("#3f3d3d")
 	return v
 }
 
