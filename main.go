@@ -105,84 +105,104 @@ $dzisiajDate = (Get-Date).Date
 $teraz = Get-Date
 $poczatekMiesiaca = Get-Date -Year $Year -Month $Month -Day 1 -Hour 0 -Minute 0 -Second 0
 $koniecMiesiaca = $poczatekMiesiaca.AddMonths(1).AddSeconds(-1)
-$eventIds = @(6005, 6006, 7001, 7002, 1, 42)
-$lockIds = @(4800, 4801)
+
+# ID startowe: włączenie komputera (6005), logowanie użytkownika (7001), odblokowanie Win+L (4801)
+# ID końcowe:  wyłączenie komputera (6006), uśpienie (42), zablokowanie Win+L (4800)
+$startIds  = @(6005, 7001, 4801)
+$stopIds   = @(6006, 42, 4800)
 
 try {
-    $events = @(Get-WinEvent -FilterHashtable @{
+    $sysEvents = @(Get-WinEvent -FilterHashtable @{
         LogName   = 'System'
-        ID        = $eventIds
+        ID        = @(6005, 6006, 7001, 42)
         StartTime = $poczatekMiesiaca
         EndTime   = $koniecMiesiaca
     } -ErrorAction SilentlyContinue)
 
     $lockEvents = @(Get-WinEvent -FilterHashtable @{
         LogName   = 'Security'
-        ID        = $lockIds
+        ID        = @(4800, 4801)
         StartTime = $poczatekMiesiaca
         EndTime   = $koniecMiesiaca
     } -ErrorAction SilentlyContinue)
 
-    # Poprawka nr 1: Nie przerywamy, jeśli rano nie wpadł log 'System', ale są logi 'Security'
-    $allEvents = @($events + $lockEvents) | Where-Object { $_ -ne $null }
-    if ($allEvents.Count -eq 0) { return "[]" }
+    # Łączymy wszystkie zdarzenia w jeden strumień z etykietą typu
+    $wszystkie = @()
+    foreach ($ev in $sysEvents) {
+        $wszystkie += [PSCustomObject]@{
+            Time    = $ev.TimeCreated
+            Id      = $ev.Id
+            IsStart = $startIds -contains $ev.Id
+            IsStop  = $stopIds  -contains $ev.Id
+        }
+    }
+    foreach ($ev in $lockEvents) {
+        $wszystkie += [PSCustomObject]@{
+            Time    = $ev.TimeCreated
+            Id      = $ev.Id
+            IsStart = $startIds -contains $ev.Id
+            IsStop  = $stopIds  -contains $ev.Id
+        }
+    }
 
-    # Zbieramy wszystkie unikalne daty, z których mamy jakiekolwiek zdarzenia
-    $unikalneDaty = $allEvents | ForEach-Object { $_.TimeCreated.Date } | Select-Object -Unique | Sort-Object
+    if ($wszystkie.Count -eq 0) { return "[]" }
+
+    # Filtrujemy godziny robocze 6:00-22:00 i sortujemy
+    $wszystkie = $wszystkie | Where-Object {
+        $_.Time.Hour -ge 6 -and $_.Time.Hour -le 22
+    } | Sort-Object Time
+
+    $unikalneDaty = $wszystkie | ForEach-Object { $_.Time.Date } | Select-Object -Unique | Sort-Object
 
     $raport = $unikalneDaty | ForEach-Object {
         $dataZdarzenia = $_
-        
-        # Filtrujemy zdarzenia dla analizowanego dnia
-        $zdarzeniaWdniu = @($events | Where-Object { $_ -ne $null -and $_.TimeCreated.Date -eq $dataZdarzenia } | Sort-Object TimeCreated)
-        $blokiWdniu = @($lockEvents | Where-Object { $_ -ne $null -and $_.TimeCreated.Date -eq $dataZdarzenia } | Sort-Object TimeCreated)
-        
-        # Poprawka nr 2: Operujemy na całych obiektach zdarzeń, by mieć dostęp do .Id i .TimeCreated
-        $pierwszeZdarzenie = $null
-        $ostatnieZdarzenie = $null
 
-        if ($zdarzeniaWdniu) { $pierwszeZdarzenie = $zdarzeniaWdniu[0] }
-        elseif ($blokiWdniu) { $pierwszeZdarzenie = $blokiWdniu[0] }
+        $wdniu = @($wszystkie | Where-Object { $_.Time.Date -eq $dataZdarzenia })
+        if ($wdniu.Count -eq 0) { return }
 
-        if ($zdarzeniaWdniu) { $ostatnieZdarzenie = $zdarzeniaWdniu[-1] }
-        elseif ($blokiWdniu) { $ostatnieZdarzenie = $blokiWdniu[-1] }
+        # START: pierwsze zdarzenie startowe (włączenie / 7001 / odblokowanie)
+        $pierwszeStart = $wdniu | Where-Object { $_.IsStart } | Select-Object -First 1
+        # KONIEC: ostatnie zdarzenie stopowe (wyłączenie / uśpienie / zablokowanie)
+        $ostatniStop   = $wdniu | Where-Object { $_.IsStop  } | Select-Object -Last 1
 
-        if ($pierwszeZdarzenie -eq $null) { return }
+        # Fallback gdy brak zdarzeń startowych lub stopowych
+        if ($pierwszeStart -eq $null) { $pierwszeStart = $wdniu[0] }
 
-        $pierwsze = $pierwszeZdarzenie.TimeCreated
-        $ostatnie = $ostatnieZdarzenie.TimeCreated
+        $pierwsze = $pierwszeStart.Time
+        $status   = ""
+        $ostatnieWyswietlane = $null
 
-        # Sprawdzamy czy ostatni log sugeruje zamknięcie pracy (na oryginalnym obiekcie zdarzenia)
-        $isClosing = $false
-        if ($zdarzeniaWdniu) {
-            $lastId = $zdarzeniaWdniu[-1].Id
-            if ($lastId -eq 6006 -or $lastId -eq 42) { $isClosing = $true }
-        }
+        # Jesli ostatnie zdarzenie dnia jest startowe - sesja nadal trwa
+        $ostatnieZdarzenie = $wdniu[-1]
+        $sesjaWToku = $dataZdarzenia -eq $dzisiajDate -and $ostatnieZdarzenie.IsStart
 
-        $status = ""
-        $ostatnieWyswietlane = $ostatnie
-        
-        # Jeśli to dzisiaj i sesja nie ma logu zamknięcia, traktujemy ją jako "w toku"
-        if ($dataZdarzenia -eq $dzisiajDate -and -not $isClosing) {
+        if ($sesjaWToku) {
             $ostatnieWyswietlane = $teraz
             $status = " (w toku)"
+        } elseif ($ostatniStop -ne $null) {
+            $ostatnieWyswietlane = $ostatniStop.Time
+        } elseif ($dataZdarzenia -eq $dzisiajDate) {
+            $ostatnieWyswietlane = $teraz
+            $status = " (w toku)"
+        } else {
+            $ostatnieWyswietlane = $wdniu[-1].Time
         }
-        
-        $czasBrutto = $ostatnieWyswietlane - $pierwsze
-        $czasBlokad = New-TimeSpan
-        $lockStart = $null
 
-        foreach ($ev in $blokiWdniu) {
-            if ($ev.Id -eq 4800) { $lockStart = $ev.TimeCreated }
-            elseif ($ev.Id -eq 4801 -and $lockStart -ne $null) {
-                $czasBlokad += ($ev.TimeCreated - $lockStart)
-                $lockStart = $null
+        $czasBrutto = $ostatnieWyswietlane - $pierwsze
+
+        # Przerwy = pary stop->start wewnątrz dnia (zablokowanie/uśpienie -> odblokowanie/włączenie)
+        $czasPrzerw = New-TimeSpan
+        $przerwaStart = $null
+        foreach ($ev in $wdniu) {
+            if ($ev.IsStop)  { $przerwaStart = $ev.Time }
+            elseif ($ev.IsStart -and $przerwaStart -ne $null) {
+                $czasPrzerw += ($ev.Time - $przerwaStart)
+                $przerwaStart = $null
             }
         }
-        if ($lockStart -ne $null -and $dataZdarzenia -eq $dzisiajDate) { $czasBlokad += ($teraz - $lockStart) }
 
-        $godzinyNetto = $czasBrutto.TotalHours - $czasBlokad.TotalHours
-        if ($godzinyNetto -lt 0 -or $blokiWdniu.Count -eq 0) { $godzinyNetto = $czasBrutto.TotalHours }
+        $godzinyNetto = $czasBrutto.TotalHours - $czasPrzerw.TotalHours
+        if ($godzinyNetto -lt 0) { $godzinyNetto = $czasBrutto.TotalHours }
 
         [PSCustomObject]@{
             Data    = $pierwsze.ToString("yyyy-MM-dd")
